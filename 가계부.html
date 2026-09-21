@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>나의 가계부</title>
+<style>
+  :root {
+    --bg: #f4f6f8;
+    --card-bg: #ffffff;
+    --text: #222;
+    --sub: #777;
+    --border: #e3e6ea;
+    --income: #1e88e5;
+    --expense: #e53935;
+    --accent: #4c6ef5;
+    --accent-hover: #3b5bdb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px 16px 60px;
+  }
+  .wrap { max-width: 900px; margin: 0 auto; }
+  h1 { text-align: center; font-size: 26px; margin-bottom: 4px; }
+  .subtitle { text-align: center; color: var(--sub); margin-bottom: 24px; font-size: 13px; }
+
+  .month-nav {
+    display: flex; align-items: center; justify-content: center;
+    gap: 12px; margin-bottom: 20px;
+  }
+  .month-nav button {
+    border: none; background: var(--card-bg); border: 1px solid var(--border);
+    width: 34px; height: 34px; border-radius: 8px; cursor: pointer; font-size: 16px;
+  }
+  .month-nav button:hover { background: #eef1ff; }
+  .month-nav .month-label { font-size: 18px; font-weight: 600; min-width: 120px; text-align: center; }
+
+  .summary {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;
+    margin-bottom: 24px;
+  }
+  .summary .card {
+    background: var(--card-bg); border-radius: 12px; padding: 16px;
+    border: 1px solid var(--border); text-align: center;
+  }
+  .summary .card .label { font-size: 13px; color: var(--sub); margin-bottom: 6px; }
+  .summary .card .value { font-size: 19px; font-weight: 700; }
+  .summary .income .value { color: var(--income); }
+  .summary .expense .value { color: var(--expense); }
+  .summary .balance .value { color: var(--text); }
+
+  form.add-form {
+    background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px;
+    padding: 16px; margin-bottom: 24px;
+    display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; align-items: end;
+  }
+  form.add-form .field { display: flex; flex-direction: column; gap: 4px; }
+  form.add-form label { font-size: 12px; color: var(--sub); }
+  form.add-form input, form.add-form select {
+    padding: 8px 8px; border: 1px solid var(--border); border-radius: 8px; font-size: 14px;
+    width: 100%;
+  }
+  form.add-form .field.desc { grid-column: span 2; }
+  form.add-form button {
+    grid-column: span 6;
+    background: var(--accent); color: #fff; border: none; border-radius: 8px;
+    padding: 10px; font-size: 15px; font-weight: 600; cursor: pointer;
+  }
+  form.add-form button:hover { background: var(--accent-hover); }
+
+  table { width: 100%; border-collapse: collapse; background: var(--card-bg);
+    border-radius: 12px; overflow: hidden; border: 1px solid var(--border); }
+  thead th {
+    background: #fafbfc; text-align: left; font-size: 13px; color: var(--sub);
+    padding: 10px 12px; border-bottom: 1px solid var(--border);
+  }
+  tbody td { padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 14px; }
+  tbody tr:last-child td { border-bottom: none; }
+  .type-badge {
+    display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600;
+  }
+  .type-badge.income { background: #e3f2fd; color: var(--income); }
+  .type-badge.expense { background: #ffebee; color: var(--expense); }
+  .amount { text-align: right; font-weight: 600; }
+  .amount.income { color: var(--income); }
+  .amount.expense { color: var(--expense); }
+  .del-btn {
+    border: none; background: none; color: #aaa; cursor: pointer; font-size: 16px;
+  }
+  .del-btn:hover { color: var(--expense); }
+  .empty { text-align: center; color: var(--sub); padding: 30px; font-size: 14px; }
+
+  @media (max-width: 700px) {
+    form.add-form { grid-template-columns: repeat(2, 1fr); }
+    form.add-form .field.desc { grid-column: span 2; }
+    form.add-form button { grid-column: span 2; }
+    .summary { grid-template-columns: 1fr; }
+    table, thead, tbody, th, td, tr { display: block; }
+    thead { display: none; }
+    tbody tr { border-bottom: 1px solid var(--border); padding: 8px 0; }
+    tbody td { border: none; padding: 4px 12px; display: flex; justify-content: space-between; }
+    tbody td::before { content: attr(data-label); color: var(--sub); font-size: 12px; }
+    .amount { text-align: right; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>나의 가계부</h1>
+  <div class="subtitle">데이터는 이 브라우저에 자동 저장됩니다</div>
+
+  <div class="month-nav">
+    <button id="prevMonth" type="button">‹</button>
+    <div class="month-label" id="monthLabel"></div>
+    <button id="nextMonth" type="button">›</button>
+  </div>
+
+  <div class="summary">
+    <div class="card income">
+      <div class="label">이번 달 수입</div>
+      <div class="value" id="totalIncome">0원</div>
+    </div>
+    <div class="card expense">
+      <div class="label">이번 달 지출</div>
+      <div class="value" id="totalExpense">0원</div>
+    </div>
+    <div class="card balance">
+      <div class="label">잔액</div>
+      <div class="value" id="totalBalance">0원</div>
+    </div>
+  </div>
+
+  <form class="add-form" id="addForm">
+    <div class="field">
+      <label>날짜</label>
+      <input type="date" id="inputDate" required>
+    </div>
+    <div class="field">
+      <label>구분</label>
+      <select id="inputType">
+        <option value="expense">지출</option>
+        <option value="income">수입</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>카테고리</label>
+      <select id="inputCategory"></select>
+    </div>
+    <div class="field desc">
+      <label>내용</label>
+      <input type="text" id="inputDesc" placeholder="예: 점심 식사">
+    </div>
+    <div class="field">
+      <label>금액</label>
+      <input type="number" id="inputAmount" min="0" step="1" placeholder="0" required>
+    </div>
+    <button type="submit">추가하기</button>
+  </form>
+
+  <table>
+    <thead>
+      <tr>
+        <th>날짜</th>
+        <th>구분</th>
+        <th>카테고리</th>
+        <th>내용</th>
+        <th style="text-align:right;">금액</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody id="tableBody"></tbody>
+  </table>
+  <div class="empty" id="emptyMsg" style="display:none;">이번 달 내역이 없습니다.</div>
+</div>
+
+<script>
+  const STORAGE_KEY = 'household_ledger_entries';
+
+  const CATEGORIES = {
+    income: ['급여', '용돈', '부수입', '기타수입'],
+    expense: ['식비', '교통비', '주거비', '통신비', '의료비', '문화생활', '쇼핑', '교육', '기타지출']
+  };
+
+  const $ = (id) => document.getElementById(id);
+  const typeSelect = $('inputType');
+  const categorySelect = $('inputCategory');
+  const dateInput = $('inputDate');
+  const monthLabel = $('monthLabel');
+
+  let entries = loadEntries();
+  let currentMonth = new Date();
+  currentMonth.setDate(1);
+
+  function loadEntries() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      return raw ? JSON.parse(raw) : [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  function saveEntries() {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
+    } catch (e) {
+      // 저장소를 사용할 수 없는 환경(예: 미리보기)에서는 현재 화면에서만 유지됩니다.
+    }
+  }
+
+  function fillCategories() {
+    const list = CATEGORIES[typeSelect.value];
+    categorySelect.innerHTML = list.map(c => `<option value="${c}">${c}</option>`).join('');
+  }
+
+  function formatWon(n) {
+    return n.toLocaleString('ko-KR') + '원';
+  }
+
+  function monthKey(d) {
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+  }
+
+  function render() {
+    monthLabel.textContent = currentMonth.getFullYear() + '년 ' + (currentMonth.getMonth() + 1) + '월';
+    const key = monthKey(currentMonth);
+    const monthEntries = entries
+      .filter(e => e.date.startsWith(key))
+      .sort((a, b) => b.date.localeCompare(a.date));
+
+    let income = 0, expense = 0;
+    monthEntries.forEach(e => {
+      if (e.type === 'income') income += e.amount;
+      else expense += e.amount;
+    });
+
+    $('totalIncome').textContent = formatWon(income);
+    $('totalExpense').textContent = formatWon(expense);
+    $('totalBalance').textContent = formatWon(income - expense);
+
+    const tbody = $('tableBody');
+    tbody.innerHTML = '';
+    $('emptyMsg').style.display = monthEntries.length ? 'none' : 'block';
+
+    monthEntries.forEach(e => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td data-label="날짜">${e.date}</td>
+        <td data-label="구분"><span class="type-badge ${e.type}">${e.type === 'income' ? '수입' : '지출'}</span></td>
+        <td data-label="카테고리">${e.category}</td>
+        <td data-label="내용">${e.desc || '-'}</td>
+        <td data-label="금액" class="amount ${e.type}">${e.type === 'income' ? '+' : '-'}${formatWon(e.amount)}</td>
+        <td><button class="del-btn" title="삭제" data-id="${e.id}">✕</button></td>
+      `;
+      tbody.appendChild(tr);
+    });
+
+    tbody.querySelectorAll('.del-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        entries = entries.filter(e => e.id !== btn.dataset.id);
+        saveEntries();
+        render();
+      });
+    });
+  }
+
+  typeSelect.addEventListener('change', fillCategories);
+
+  $('addForm').addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    const amount = Number($('inputAmount').value);
+    if (!dateInput.value || !amount) return;
+
+    entries.push({
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      date: dateInput.value,
+      type: typeSelect.value,
+      category: categorySelect.value,
+      desc: $('inputDesc').value.trim(),
+      amount: amount
+    });
+    saveEntries();
+
+    const enteredMonth = dateInput.value.slice(0, 7);
+    currentMonth = new Date(enteredMonth + '-01');
+
+    $('inputDesc').value = '';
+    $('inputAmount').value = '';
+    render();
+  });
+
+  $('prevMonth').addEventListener('click', () => {
+    currentMonth.setMonth(currentMonth.getMonth() - 1);
+    render();
+  });
+  $('nextMonth').addEventListener('click', () => {
+    currentMonth.setMonth(currentMonth.getMonth() + 1);
+    render();
+  });
+
+  // init
+  fillCategories();
+  dateInput.value = new Date().toISOString().slice(0, 10);
+  render();
+</script>
+</body>
+</html>
