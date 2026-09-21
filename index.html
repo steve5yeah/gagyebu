@@ -199,15 +199,25 @@ table.budget tr:last-child td{border-bottom:none}
 .filelabel:hover{background:var(--surface-3)}
 .btnrow{display:flex;flex-wrap:wrap;gap:8px}
 .desc-r{font-weight:400;font-size:12.5px;text-align:right;color:var(--text-2)}
+
+/* ---------- 동기화 표시 ---------- */
+.sync{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;color:var(--text-3);margin-left:auto;white-space:nowrap}
+.sync .dot{width:6px;height:6px;border-radius:50%;background:var(--line-2);flex:none}
+.sync[data-s="ok"] .dot{background:var(--text-3)}
+.sync[data-s="pending"] .dot{background:var(--text-2);animation:sync-blink 1.1s ease-in-out infinite}
+.sync[data-s="offline"] .dot,.sync[data-s="error"] .dot{background:var(--text);box-shadow:0 0 0 3px var(--surface-3)}
+.sync[data-s="offline"],.sync[data-s="error"]{color:var(--text-2)}
+@keyframes sync-blink{50%{opacity:.25}}
 </style>
 </head>
 <body>
-<div class="wrap">
+<div class="wrap" id="app">
 
   <header class="top">
     <div class="brand">
       <h1>우리집 가계부</h1>
       <span class="tag">2인가구</span>
+      <span class="sync" id="syncBadge" data-s="idle"><span class="dot"></span><span id="syncText"></span></span>
     </div>
     <nav class="tabs" id="tabs">
       <button data-view="dash" class="on">대시보드</button>
@@ -234,10 +244,14 @@ table.budget tr:last-child td{border-bottom:none}
   </main>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script>
 /* =========================================================
-   우리집 가계부 — 단일 HTML · localStorage 저장 (서버 없음)
+   우리집 가계부 — 단일 HTML · Supabase 저장 + localStorage 캐시
    ========================================================= */
+
+var SB_URL = 'https://fpffmmbuiomcfdrjxnck.supabase.co';
+var SB_KEY = 'sb_publishable_Pm65kISKxBFgjVbZxIKI0g_rYUQbawS';
 
 var KEY = 'hb_v2';
 var LEGACY_KEY = 'household_ledger_entries';
@@ -338,25 +352,89 @@ function dparts(s){
   return {y:a[0], m:a[1], d:a[2], wd:new Date(a[0], a[1]-1, a[2]).getDay()};
 }
 
-/* ---------- 저장 / 불러오기 ---------- */
-function load(){
+/* =========================================================
+   저장 계층 — Supabase(원본) + localStorage(캐시)
+
+   db 객체의 모양은 그대로 두고 저장·불러오기만 바꾼다.
+   save()는 즉시 캐시에 쓰고, 500ms 뒤 서버와의 차이만 밀어 올린다.
+   ========================================================= */
+
+var sb = window.supabase ? window.supabase.createClient(SB_URL, SB_KEY) : null;
+var META_ID = 'main';                   // ledger_meta 는 이 한 행만 쓴다
+var synced = {entries:{}, meta:null};   // 마지막으로 서버와 일치시킨 내용의 지문
+var syncTimer = null, pushing = false, needPush = false;
+
+function cacheKey(){ return KEY + '_cache'; }
+function sig(o){ return JSON.stringify(o); }
+function chunk(a, n){ var o = []; for(var i = 0; i < a.length; i += n) o.push(a.slice(i, i + n)); return o; }
+
+/* ---------- 행 <-> 항목 변환 ---------- */
+function entryToRow(e){
+  return {
+    id: e.id,
+    date: e.date,
+    type: e.type,
+    category: e.category,
+    descr: e.desc || '',
+    amount: Number(e.amount) || 0,
+    payer: e.payer || 'common',
+    fixed: (e.f === undefined || e.f === null || e.f === '') ? null : !!Number(e.f)
+  };
+}
+function rowToEntry(r){
+  var e = {
+    id: r.id, date: r.date, type: r.type, category: r.category,
+    desc: r.descr || '', amount: Number(r.amount) || 0, payer: r.payer || 'common'
+  };
+  if(r.fixed === true) e.f = 1;
+  else if(r.fixed === false) e.f = 0;
+  return e;
+}
+function metaRowOf(d){
+  return {
+    id: META_ID,
+    budgets: d.budgets || {},
+    irregular: d.irregular || [],
+    cats: d.cats || [],
+    settings: d.settings || {}
+  };
+}
+
+/* ---------- 캐시 ---------- */
+function normalizeDb(p){
+  var d = Object.assign(defaultDb(), p || {});
+  d.settings  = Object.assign(defaultDb().settings, (p && p.settings) || {});
+  d.entries   = Array.isArray(d.entries) ? d.entries : [];
+  d.cats      = Array.isArray(d.cats) ? d.cats : [];
+  d.irregular = Array.isArray(d.irregular) ? d.irregular : [];
+  d.budgets   = (d.budgets && typeof d.budgets === 'object') ? d.budgets : {};
+  return d;
+}
+function writeCache(isDirty){
+  try{ localStorage.setItem(cacheKey(), JSON.stringify({db:db, dirty:!!isDirty, at:Date.now()})); }catch(e){}
+}
+function readCache(){
+  try{
+    var raw = localStorage.getItem(cacheKey());
+    if(!raw) return null;
+    var p = JSON.parse(raw);
+    if(!p || !p.db) return null;
+    return {db: normalizeDb(p.db), dirty: !!p.dirty};
+  }catch(e){ return null; }
+}
+
+/* 서버가 비어 있을 때 한 번만 쓰이는, Supabase 이전 버전의 로컬 데이터 */
+function localLegacyDb(){
   var raw = null;
-  try { raw = localStorage.getItem(KEY); } catch(e) {}
+  try{ raw = localStorage.getItem(KEY); }catch(e){}
   if(raw){
     try{
       var p = JSON.parse(raw);
-      db = Object.assign(defaultDb(), p);
-      db.settings = Object.assign(defaultDb().settings, p.settings || {});
-    }catch(e){ db = defaultDb(); }
-  }else{
-    migrateLegacy();
+      if(p && Array.isArray(p.entries)) return normalizeDb(p);
+    }catch(e){}
   }
-}
-
-function migrateLegacy(){
-  var raw = null;
-  try { raw = localStorage.getItem(LEGACY_KEY); } catch(e) {}
-  if(!raw) return;
+  try{ raw = localStorage.getItem(LEGACY_KEY); }catch(e){ raw = null; }
+  if(!raw) return null;
   var map = {
     '식비':'식비·장보기','교통비':'교통·차량','주거비':'주거·관리비','통신비':'통신·구독',
     '의료비':'의료·건강','문화생활':'문화·여가','쇼핑':'쇼핑·의류','교육':'교육·자기계발',
@@ -364,8 +442,9 @@ function migrateLegacy(){
   };
   try{
     var old = JSON.parse(raw);
-    if(!Array.isArray(old)) return;
-    db.entries = old.map(function(e){
+    if(!Array.isArray(old) || !old.length) return null;
+    var d = defaultDb();
+    d.entries = old.map(function(e){
       return {
         id: e.id || uid(),
         date: e.date,
@@ -375,13 +454,149 @@ function migrateLegacy(){
         amount: Number(e.amount) || 0,
         payer: 'common'
       };
-    });
-    save();
-  }catch(e){}
+    }).filter(function(e){ return !!e.date; });
+    return d;
+  }catch(e){ return null; }
 }
 
+/* ---------- 동기화 상태 표시 ---------- */
+var SYNC_TEXT = {idle:'', loading:'불러오는 중', pending:'저장 중', ok:'동기화됨', offline:'오프라인', error:'동기화 실패'};
+var syncNow = 'idle';
+function setSync(s, detail){
+  syncNow = s;
+  var el = $('#syncBadge');
+  if(!el) return;
+  el.dataset.s = s;
+  $('#syncText').textContent = SYNC_TEXT[s] || '';
+  el.title = detail || (s === 'offline' ? '이 기기에만 저장 중입니다. 연결되면 자동으로 올라갑니다.' : '');
+}
+
+/* ---------- 저장 ---------- */
 function save(){
-  try { localStorage.setItem(KEY, JSON.stringify(db)); } catch(e) {}
+  writeCache(true);
+  if(!sb) return;
+  setSync('pending');
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(pushRemote, 500);
+}
+
+function pushRemote(){
+  if(!sb) return Promise.resolve();
+  if(pushing){ needPush = true; return Promise.resolve(); }
+  clearTimeout(syncTimer);
+  pushing = true;
+  setSync('pending');
+
+  var cur = {};
+  db.entries.forEach(function(e){ cur[e.id] = e; });
+
+  var ups = [];
+  Object.keys(cur).forEach(function(id){
+    var row = entryToRow(cur[id]);
+    if(synced.entries[id] !== sig(row)) ups.push(row);
+  });
+  var dels = Object.keys(synced.entries).filter(function(id){ return !cur[id]; });
+
+  var mrow = metaRowOf(db);
+  var metaChanged = (synced.meta !== sig(mrow));
+
+  var jobs = [];
+  chunk(ups, 400).forEach(function(part){
+    jobs.push(sb.from('entries').upsert(part, {onConflict:'id'}));
+  });
+  chunk(dels, 400).forEach(function(part){
+    jobs.push(sb.from('entries').delete().in('id', part));
+  });
+  if(metaChanged) jobs.push(sb.from('ledger_meta').upsert(mrow, {onConflict:'id'}));
+
+  if(!jobs.length){
+    pushing = false;
+    writeCache(false);
+    setSync('ok');
+    return Promise.resolve();
+  }
+
+  return Promise.all(jobs).then(function(res){
+    var bad = res.filter(function(r){ return r && r.error; })[0];
+    if(bad) throw bad.error;
+    ups.forEach(function(r){ synced.entries[r.id] = sig(r); });
+    dels.forEach(function(id){ delete synced.entries[id]; });
+    if(metaChanged) synced.meta = sig(mrow);
+    writeCache(false);
+    setSync('ok');
+  }).catch(function(err){
+    setSync(navigator.onLine ? 'error' : 'offline', err && err.message);
+  }).then(function(){
+    pushing = false;
+    if(needPush){ needPush = false; save(); }
+  });
+}
+
+/* ---------- 불러오기 ---------- */
+function fetchAllEntries(){
+  var out = [], size = 1000;
+  function step(page){
+    return sb.from('entries')
+      .select('id,date,type,category,descr,amount,payer,fixed')
+      .order('date', {ascending:true}).order('id', {ascending:true})
+      .range(page * size, page * size + size - 1)
+      .then(function(r){
+        if(r.error) throw r.error;
+        var got = r.data || [];
+        out = out.concat(got);
+        return got.length < size ? out : step(page + 1);
+      });
+  }
+  return step(0);
+}
+
+function pullRemote(){
+  if(!sb) return Promise.resolve();
+  setSync('loading');
+  return Promise.all([
+    fetchAllEntries(),
+    sb.from('ledger_meta').select('*').eq('id', META_ID).maybeSingle()
+  ]).then(function(r){
+    if(r[1].error) throw r[1].error;
+    var rows = r[0], m = r[1].data;
+
+    var server = defaultDb();
+    server.entries = rows.map(rowToEntry);
+    if(m){
+      server.budgets   = m.budgets || {};
+      server.irregular = m.irregular || [];
+      server.cats      = m.cats || [];
+      server.settings  = Object.assign(defaultDb().settings, m.settings || {});
+    }
+
+    // 서버의 현재 상태를 기준선으로 기록해 두면, 이후 push는 차이만 보낸다.
+    synced = {entries:{}, meta:sig(metaRowOf(server))};
+    rows.forEach(function(row){ synced.entries[row.id] = sig(entryToRow(rowToEntry(row))); });
+
+    var cache = readCache();
+    if(cache && cache.dirty){
+      db = cache.db;                       // 아직 못 올린 로컬 변경이 있으면 그쪽이 최신
+      return pushRemote();
+    }
+    if(!rows.length && !m){
+      var legacy = localLegacyDb();        // 최초 1회: 이 브라우저의 기존 내역을 서버로 이관
+      if(legacy){
+        db = legacy;
+        return pushRemote().then(function(){
+          if(syncNow !== 'ok') return;
+          try{ localStorage.removeItem(KEY); localStorage.removeItem(LEGACY_KEY); }catch(e){}
+          alert('이 브라우저에 있던 내역 ' + db.entries.length + '건을 서버로 옮겼습니다.');
+        });
+      }
+    }
+    db = server;
+    writeCache(false);
+    setSync('ok');
+  }).catch(function(err){
+    var cache = readCache();
+    if(cache) db = cache.db;
+    setSync(navigator.onLine ? 'error' : 'offline', err && err.message);
+  });
 }
 
 /* ---------- 집계 ---------- */
@@ -1067,14 +1282,18 @@ function renderSettings(){
       '<div class="note">30대 2인가구는 한쪽 소득이 끊겨도 버틸 수 있도록 생활비 4개월치를 비상금 기준으로 잡습니다.</div></div>' +
 
     '<div class="card"><h2>데이터 관리</h2>' +
-      '<p class="hint">내역은 서버로 전송되지 않고 이 브라우저에만 저장됩니다. 기기를 바꾸거나 브라우저 데이터를 지우면 사라지니 가끔 백업하세요.</p>' +
+      '<p class="hint">내역은 Supabase 서버에 저장되고, 이 브라우저에는 사본이 남아 오프라인에서도 열립니다. 어느 기기에서 열어도 같은 내역을 봅니다.</p>' +
       '<div class="btnrow">' +
+        '<button class="btn" id="btnPull" type="button">서버에서 다시 불러오기</button>' +
+      '</div>' +
+      '<div class="btnrow" style="margin-top:8px">' +
         '<button class="btn" id="btnExport" type="button">백업 파일 내려받기</button>' +
         '<label class="filelabel">복원하기<input type="file" id="fileImport" accept="application/json,.json" hidden></label>' +
         '<button class="btn" id="btnReset" type="button"><span class="danger">전체 삭제</span></button>' +
       '</div>' +
       '<div class="note">저장된 내역 <strong>' + db.entries.length + '건</strong>' +
-        (dates.length ? ' · ' + dates[0] + ' ~ ' + dates[dates.length-1] : '') + '</div></div>' +
+        (dates.length ? ' · ' + dates[0] + ' ~ ' + dates[dates.length-1] : '') +
+        '<br>전체 삭제와 복원은 서버 내역에도 그대로 반영됩니다.</div></div>' +
   '</div>' +
 
   '<div class="card" style="margin-top:12px"><h2>카테고리</h2>' +
@@ -1149,6 +1368,16 @@ function renderSettings(){
     };
   });
 
+  $('#btnPull').onclick = function(){
+    var b = $('#btnPull');
+    b.disabled = true;
+    b.textContent = '불러오는 중…';
+    pullRemote().then(function(){
+      render();
+      if(syncNow !== 'ok') alert('서버에서 불러오지 못했습니다. 연결을 확인해 주세요.');
+    });
+  };
+
   $('#btnExport').onclick = function(){
     var blob = new Blob([JSON.stringify(db, null, 2)], {type:'application/json'});
     var a = document.createElement('a');
@@ -1217,8 +1446,24 @@ $('#prevMonth').onclick = function(){ cursor = new Date(cursor.getFullYear(), cu
 $('#nextMonth').onclick = function(){ cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1); render(); };
 $('#thisMonth').onclick = function(){ var d = new Date(); d.setDate(1); cursor = d; render(); };
 
-load();
-render();
+/* =========================================================
+   시작
+   ========================================================= */
+var cached = readCache();
+db = cached ? cached.db : defaultDb();
+render();                           // 캐시로 먼저 그리고
+
+if(sb){
+  pullRemote().then(render);        // 서버와 맞춘 뒤 다시 그린다
+
+  /* 아직 못 올린 변경이 있으면 탭을 떠나기 전에 밀어 올린다 */
+  document.addEventListener('visibilitychange', function(){
+    if(document.hidden) pushRemote();
+  });
+  window.addEventListener('online', pushRemote);
+}else{
+  setSync('error', 'Supabase 라이브러리를 불러오지 못했습니다.');
+}
 </script>
 </body>
 </html>
